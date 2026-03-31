@@ -37,6 +37,10 @@ SUPPORTED_ENGINES = {
             "en_female_1": "en-US-JennyNeural",
             "en_male_1": "en-US-GuyNeural",
         },
+        "language_defaults": {
+            "ko": "ko_female_1",
+            "en": "en_female_1",
+        },
     }
 }
 
@@ -77,7 +81,6 @@ guild_settings: dict[str, dict] = {}
 def load_settings() -> dict[str, dict]:
     if not CONFIG_PATH.exists():
         return {}
-
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -101,6 +104,9 @@ def get_guild_config(guild_id: int) -> dict:
             "read_channel_id": None,
             "tts_engine": DEFAULT_TTS_ENGINE,
             "voice_id": get_default_voice_id(),
+            "autojoin": False,
+            "xsaid": True,
+            "multilang": True,
         }
         save_settings()
     return guild_settings[key]
@@ -122,6 +128,26 @@ def resolve_voice(engine: str, voice_id: str) -> str:
         raise ValueError(f"지원하지 않는 voice_id야: {voice_id}")
 
     return provider_voice
+
+
+def detect_language(text: str) -> str:
+    has_korean = any("가" <= ch <= "힣" for ch in text)
+    has_english = any("a" <= ch.lower() <= "z" for ch in text)
+
+    if has_korean:
+        return "ko"
+    if has_english:
+        return "en"
+    return "ko"
+
+
+def choose_voice_id_for_text(config: dict, text: str) -> str:
+    if not config.get("multilang", True):
+        return config["voice_id"]
+
+    engine = config["tts_engine"]
+    language = detect_language(text)
+    return SUPPORTED_ENGINES[engine]["language_defaults"].get(language, config["voice_id"])
 
 
 async def synthesize_tts(text: str, engine: str, voice_id: str) -> Path:
@@ -212,14 +238,17 @@ def sanitize_text(text: str) -> str:
 
 
 def build_channel_read_text(message: discord.Message) -> str:
-    author = message.author.display_name
+    config = get_guild_config(message.guild.id)
     content = sanitize_text(message.content)
-    return f"{author}. {content}"
+    if config.get("xsaid", True):
+        return f"{message.author.display_name}. {content}"
+    return content
 
 
 async def enqueue_tts(guild: discord.Guild, channel_id: int, text: str, author_name: str) -> int:
     config = get_guild_config(guild.id)
-    audio_path = await synthesize_tts(text, config["tts_engine"], config["voice_id"])
+    voice_id = choose_voice_id_for_text(config, text)
+    audio_path = await synthesize_tts(text, config["tts_engine"], voice_id)
 
     state = get_guild_state(guild.id)
     item = TTSItem(
@@ -265,7 +294,19 @@ async def on_message(message: discord.Message) -> None:
 
     voice_client = message.guild.voice_client
     if not voice_client or not voice_client.is_connected():
-        return
+        if config.get("autojoin"):
+            voice_state = getattr(message.author, "voice", None)
+            if voice_state and voice_state.channel:
+                try:
+                    await voice_state.channel.connect(timeout=20, reconnect=True)
+                    voice_client = message.guild.voice_client
+                except Exception as exc:
+                    await message.channel.send(f"자동 입장 중 오류가 났어: {exc}")
+                    return
+            else:
+                return
+        else:
+            return
 
     text = build_channel_read_text(message)
     if not text:
@@ -405,7 +446,7 @@ async def engines(ctx: commands.Context) -> None:
 
 @bot.command(name="voices")
 async def voices(ctx: commands.Context, engine: str | None = None) -> None:
-    target_engine = engine or get_guild_config(ctx.guild.id)["tts_engine"] if ctx.guild else DEFAULT_TTS_ENGINE
+    target_engine = engine or (get_guild_config(ctx.guild.id)["tts_engine"] if ctx.guild else DEFAULT_TTS_ENGINE)
     if target_engine not in SUPPORTED_ENGINES:
         await ctx.reply(f"지원하지 않는 엔진이야: {target_engine}")
         return
@@ -447,7 +488,7 @@ async def set_voice(ctx: commands.Context, voice_id: str) -> None:
     config = get_guild_config(ctx.guild.id)
     engine = config["tts_engine"]
     if voice_id not in SUPPORTED_ENGINES[engine]["voices"]:
-        await ctx.reply(f"지원하지 않는 voice_id야. `!voices`로 확인해 줘.")
+        await ctx.reply("지원하지 않는 voice_id야. `!voices`로 확인해 줘.")
         return
 
     config["voice_id"] = voice_id
@@ -463,7 +504,132 @@ async def voice_status(ctx: commands.Context) -> None:
 
     config = get_guild_config(ctx.guild.id)
     await ctx.reply(
-        f"현재 엔진: {config['tts_engine']}\n현재 보이스: {describe_voice(config['tts_engine'], config['voice_id'])}"
+        f"현재 엔진: {config['tts_engine']}\n현재 기본 보이스: {describe_voice(config['tts_engine'], config['voice_id'])}"
+    )
+
+
+@bot.command(name="male")
+@commands.has_permissions(manage_guild=True)
+async def set_male_voice(ctx: commands.Context) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    config["voice_id"] = "ko_male_1"
+    save_settings()
+    await ctx.reply(f"남성 보이스로 바꿨어: {describe_voice(config['tts_engine'], config['voice_id'])}")
+
+
+@bot.command(name="female")
+@commands.has_permissions(manage_guild=True)
+async def set_female_voice(ctx: commands.Context) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    config["voice_id"] = "ko_female_1"
+    save_settings()
+    await ctx.reply(f"여성 보이스로 바꿨어: {describe_voice(config['tts_engine'], config['voice_id'])}")
+
+
+@bot.command(name="autojoin")
+@commands.has_permissions(manage_guild=True)
+async def autojoin(ctx: commands.Context, value: str | None = None) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    if value is None:
+        await ctx.reply(f"autojoin 현재 상태: {'켜짐' if config.get('autojoin') else '꺼짐'}")
+        return
+
+    normalized = value.strip().lower()
+    if normalized in {"on", "true", "1", "yes"}:
+        config["autojoin"] = True
+    elif normalized in {"off", "false", "0", "no"}:
+        config["autojoin"] = False
+    else:
+        await ctx.reply("값은 on/off 중 하나로 넣어 줘.")
+        return
+
+    save_settings()
+    await ctx.reply(f"autojoin을 {'켜짐' if config.get('autojoin') else '꺼짐'}으로 설정했어.")
+
+
+@bot.command(name="xsaid")
+@commands.has_permissions(manage_guild=True)
+async def xsaid(ctx: commands.Context, value: str | None = None) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    if value is None:
+        await ctx.reply(f"xsaid 현재 상태: {'켜짐' if config.get('xsaid', True) else '꺼짐'}")
+        return
+
+    normalized = value.strip().lower()
+    if normalized in {"on", "true", "1", "yes"}:
+        config["xsaid"] = True
+    elif normalized in {"off", "false", "0", "no"}:
+        config["xsaid"] = False
+    else:
+        await ctx.reply("값은 on/off 중 하나로 넣어 줘.")
+        return
+
+    save_settings()
+    await ctx.reply(f"xsaid를 {'켜짐' if config.get('xsaid', True) else '꺼짐'}으로 설정했어.")
+
+
+@bot.command(name="multilang")
+@commands.has_permissions(manage_guild=True)
+async def multilang(ctx: commands.Context, value: str | None = None) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    if value is None:
+        await ctx.reply(f"multilang 현재 상태: {'켜짐' if config.get('multilang', True) else '꺼짐'}")
+        return
+
+    normalized = value.strip().lower()
+    if normalized in {"on", "true", "1", "yes"}:
+        config["multilang"] = True
+    elif normalized in {"off", "false", "0", "no"}:
+        config["multilang"] = False
+    else:
+        await ctx.reply("값은 on/off 중 하나로 넣어 줘.")
+        return
+
+    save_settings()
+    await ctx.reply(f"한국어/영어 자동 읽기를 {'켜짐' if config.get('multilang', True) else '꺼짐'}으로 설정했어.")
+
+
+@bot.command(name="settings")
+async def settings(ctx: commands.Context) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    channel_id = config.get("read_channel_id")
+    channel = ctx.guild.get_channel(channel_id) if channel_id else None
+    channel_text = channel.mention if channel else "설정 안 됨"
+
+    await ctx.reply(
+        "현재 설정\n"
+        f"- 자동 읽기 채널: {channel_text}\n"
+        f"- 엔진: {config['tts_engine']}\n"
+        f"- 기본 보이스: {describe_voice(config['tts_engine'], config['voice_id'])}\n"
+        f"- 한국어 기본: {describe_voice(config['tts_engine'], SUPPORTED_ENGINES[config['tts_engine']]['language_defaults']['ko'])}\n"
+        f"- 영어 기본: {describe_voice(config['tts_engine'], SUPPORTED_ENGINES[config['tts_engine']]['language_defaults']['en'])}\n"
+        f"- autojoin: {'켜짐' if config.get('autojoin') else '꺼짐'}\n"
+        f"- xsaid: {'켜짐' if config.get('xsaid', True) else '꺼짐'}\n"
+        f"- multilang: {'켜짐' if config.get('multilang', True) else '꺼짐'}"
     )
 
 
@@ -474,8 +640,8 @@ async def sample(ctx: commands.Context, voice_id: str | None = None, *, text: st
         return
 
     config = get_guild_config(ctx.guild.id)
-    target_voice = voice_id or config["voice_id"]
-    sample_text = text or "안녕하세요. 이건 디스코드 TTS 봇 음성 샘플입니다."
+    target_voice = voice_id or choose_voice_id_for_text(config, text or "안녕하세요")
+    sample_text = text or "안녕하세요. This is a Discord TTS bot sample."
 
     try:
         await ensure_voice_client(ctx)
@@ -513,7 +679,6 @@ async def stop(ctx: commands.Context) -> None:
         return
 
     state = get_guild_state(ctx.guild.id)
-
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
 
@@ -535,8 +700,8 @@ async def queue_status(ctx: commands.Context) -> None:
 
     state = get_guild_state(ctx.guild.id)
     pending_items = list(state.queue._queue)
-
     lines = []
+
     if state.current_item:
         lines.append(f"지금 재생 중: {state.current_item.author_name} - {state.current_item.text[:60]}")
 
@@ -566,6 +731,7 @@ async def help_command(ctx: commands.Context) -> None:
         f"- {COMMAND_PREFIX}settings\n"
         f"- {COMMAND_PREFIX}autojoin <on|off>\n"
         f"- {COMMAND_PREFIX}xsaid <on|off>\n"
+        f"- {COMMAND_PREFIX}multilang <on|off>\n"
         f"- {COMMAND_PREFIX}engines\n"
         f"- {COMMAND_PREFIX}voices [engine]\n"
         f"- {COMMAND_PREFIX}setengine <engine>\n"
@@ -588,6 +754,7 @@ async def help_command(ctx: commands.Context) -> None:
 @set_female_voice.error
 @autojoin.error
 @xsaid.error
+@multilang.error
 async def admin_command_error(ctx: commands.Context, error: Exception) -> None:
     if isinstance(error, commands.MissingPermissions):
         await ctx.reply("이 명령어는 서버 관리 권한이 있어야 써.")
