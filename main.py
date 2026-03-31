@@ -729,7 +729,6 @@ async def help_command(ctx: commands.Context) -> None:
         f"- {COMMAND_PREFIX}clearreadchannel\n"
         f"- {COMMAND_PREFIX}readchannel\n"
         f"- {COMMAND_PREFIX}settings\n"
-        f"- {COMMAND_PREFIX}autojoin <on|off>\n"
         f"- {COMMAND_PREFIX}xsaid <on|off>\n"
         f"- {COMMAND_PREFIX}multilang <on|off>\n"
         f"- {COMMAND_PREFIX}engines\n"
@@ -752,7 +751,6 @@ async def help_command(ctx: commands.Context) -> None:
 @set_voice.error
 @set_male_voice.error
 @set_female_voice.error
-@autojoin.error
 @xsaid.error
 @multilang.error
 async def admin_command_error(ctx: commands.Context, error: Exception) -> None:
