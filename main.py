@@ -264,6 +264,7 @@ async def enqueue_tts(guild: discord.Guild, channel_id: int, text: str, author_n
     )
     await state.queue.put(item)
     ensure_worker(guild.id)
+    debug_log(f"queue size now {state.queue.qsize()} for guild={guild.id}")
     return state.queue.qsize()
 
 
