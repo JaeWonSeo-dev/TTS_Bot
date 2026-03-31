@@ -348,7 +348,7 @@ async def say(ctx: commands.Context, *, text: str | None = None) -> None:
         await ctx.reply(f"대기열에 추가했어. 현재 대기: {queue_size}개")
 
 
-@bot.command(name="setreadchannel")
+@bot.command(name="setreadchannel", aliases=["setup"])
 @commands.has_permissions(manage_guild=True)
 async def set_read_channel(ctx: commands.Context, channel: discord.TextChannel | None = None) -> None:
     if not ctx.guild:
@@ -560,13 +560,18 @@ async def help_command(ctx: commands.Context) -> None:
         f"- {COMMAND_PREFIX}join\n"
         f"- {COMMAND_PREFIX}leave\n"
         f"- {COMMAND_PREFIX}say <문장>\n"
-        f"- {COMMAND_PREFIX}setreadchannel [#채널]\n"
+        f"- {COMMAND_PREFIX}setreadchannel [#채널] / {COMMAND_PREFIX}setup [#채널]\n"
         f"- {COMMAND_PREFIX}clearreadchannel\n"
         f"- {COMMAND_PREFIX}readchannel\n"
+        f"- {COMMAND_PREFIX}settings\n"
+        f"- {COMMAND_PREFIX}autojoin <on|off>\n"
+        f"- {COMMAND_PREFIX}xsaid <on|off>\n"
         f"- {COMMAND_PREFIX}engines\n"
         f"- {COMMAND_PREFIX}voices [engine]\n"
         f"- {COMMAND_PREFIX}setengine <engine>\n"
         f"- {COMMAND_PREFIX}setvoice <voice_id>\n"
+        f"- {COMMAND_PREFIX}male\n"
+        f"- {COMMAND_PREFIX}female\n"
         f"- {COMMAND_PREFIX}voice\n"
         f"- {COMMAND_PREFIX}sample [voice_id] [문장]\n"
         f"- {COMMAND_PREFIX}skip\n"
@@ -579,6 +584,10 @@ async def help_command(ctx: commands.Context) -> None:
 @clear_read_channel.error
 @set_engine.error
 @set_voice.error
+@set_male_voice.error
+@set_female_voice.error
+@autojoin.error
+@xsaid.error
 async def admin_command_error(ctx: commands.Context, error: Exception) -> None:
     if isinstance(error, commands.MissingPermissions):
         await ctx.reply("이 명령어는 서버 관리 권한이 있어야 써.")
