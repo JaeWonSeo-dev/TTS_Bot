@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import os
 import tempfile
 import uuid
@@ -16,15 +17,35 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
-TTS_VOICE = os.getenv("TTS_VOICE", "ko-KR-SunHiNeural")
+DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "edge")
+DEFAULT_TTS_VOICE = os.getenv("TTS_VOICE", "ko-KR-SunHiNeural")
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 MAX_TTS_LENGTH = int(os.getenv("MAX_TTS_LENGTH", "300"))
 TEMP_DIR = Path(os.getenv("TTS_TEMP_DIR", tempfile.gettempdir())) / "discord_tts_bot"
+DATA_DIR = Path(os.getenv("TTS_DATA_DIR", "data"))
+SAMPLES_DIR = Path(os.getenv("TTS_SAMPLES_DIR", "voice_samples"))
+CONFIG_PATH = DATA_DIR / "guild_settings.json"
+
+SUPPORTED_ENGINES = {
+    "edge": {
+        "label": "Microsoft Edge TTS",
+        "voices": {
+            "ko_female_1": "ko-KR-SunHiNeural",
+            "ko_female_2": "ko-KR-JiMinNeural",
+            "ko_male_1": "ko-KR-InJoonNeural",
+            "ko_male_2": "ko-KR-BongJinNeural",
+            "en_female_1": "en-US-JennyNeural",
+            "en_male_1": "en-US-GuyNeural",
+        },
+    }
+}
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is not set. Add it to your .env file.")
 
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -50,6 +71,39 @@ class GuildAudioState:
 
 
 guild_states: dict[int, GuildAudioState] = {}
+guild_settings: dict[str, dict] = {}
+
+
+def load_settings() -> dict[str, dict]:
+    if not CONFIG_PATH.exists():
+        return {}
+
+    with CONFIG_PATH.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_settings() -> None:
+    with CONFIG_PATH.open("w", encoding="utf-8") as f:
+        json.dump(guild_settings, f, ensure_ascii=False, indent=2)
+
+
+def get_default_voice_id() -> str:
+    for voice_id, provider_voice in SUPPORTED_ENGINES[DEFAULT_TTS_ENGINE]["voices"].items():
+        if provider_voice == DEFAULT_TTS_VOICE:
+            return voice_id
+    return next(iter(SUPPORTED_ENGINES[DEFAULT_TTS_ENGINE]["voices"]))
+
+
+def get_guild_config(guild_id: int) -> dict:
+    key = str(guild_id)
+    if key not in guild_settings:
+        guild_settings[key] = {
+            "read_channel_id": None,
+            "tts_engine": DEFAULT_TTS_ENGINE,
+            "voice_id": get_default_voice_id(),
+        }
+        save_settings()
+    return guild_settings[key]
 
 
 def get_guild_state(guild_id: int) -> GuildAudioState:
@@ -58,11 +112,28 @@ def get_guild_state(guild_id: int) -> GuildAudioState:
     return guild_states[guild_id]
 
 
-async def synthesize_tts(text: str, voice: str) -> Path:
+def resolve_voice(engine: str, voice_id: str) -> str:
+    engine_info = SUPPORTED_ENGINES.get(engine)
+    if not engine_info:
+        raise ValueError(f"지원하지 않는 엔진이야: {engine}")
+
+    provider_voice = engine_info["voices"].get(voice_id)
+    if not provider_voice:
+        raise ValueError(f"지원하지 않는 voice_id야: {voice_id}")
+
+    return provider_voice
+
+
+async def synthesize_tts(text: str, engine: str, voice_id: str) -> Path:
     output_path = TEMP_DIR / f"tts_{uuid.uuid4().hex}.mp3"
-    communicate = edge_tts.Communicate(text=text, voice=voice)
-    await communicate.save(str(output_path))
-    return output_path
+
+    if engine == "edge":
+        provider_voice = resolve_voice(engine, voice_id)
+        communicate = edge_tts.Communicate(text=text, voice=provider_voice)
+        await communicate.save(str(output_path))
+        return output_path
+
+    raise RuntimeError(f"아직 구현되지 않은 엔진이야: {engine}")
 
 
 async def ensure_voice_client(ctx: commands.Context) -> discord.VoiceClient:
@@ -140,9 +211,70 @@ def sanitize_text(text: str) -> str:
     return text[:MAX_TTS_LENGTH].strip()
 
 
+def build_channel_read_text(message: discord.Message) -> str:
+    author = message.author.display_name
+    content = sanitize_text(message.content)
+    return f"{author}. {content}"
+
+
+async def enqueue_tts(guild: discord.Guild, channel_id: int, text: str, author_name: str) -> int:
+    config = get_guild_config(guild.id)
+    audio_path = await synthesize_tts(text, config["tts_engine"], config["voice_id"])
+
+    state = get_guild_state(guild.id)
+    item = TTSItem(
+        text=text,
+        author_name=author_name,
+        text_channel_id=channel_id,
+        file_path=audio_path,
+    )
+    await state.queue.put(item)
+    ensure_worker(guild.id)
+    return state.queue.qsize()
+
+
+def describe_voice(engine: str, voice_id: str) -> str:
+    provider_voice = resolve_voice(engine, voice_id)
+    return f"{voice_id} ({provider_voice})"
+
+
 @bot.event
 async def on_ready() -> None:
+    global guild_settings
+    guild_settings = load_settings()
     print(f"Logged in as {bot.user}")
+
+
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot or not message.guild:
+        return
+
+    await bot.process_commands(message)
+
+    config = get_guild_config(message.guild.id)
+    read_channel_id = config.get("read_channel_id")
+    if not read_channel_id or message.channel.id != read_channel_id:
+        return
+
+    if message.content.startswith(COMMAND_PREFIX):
+        return
+
+    if not message.content.strip():
+        return
+
+    voice_client = message.guild.voice_client
+    if not voice_client or not voice_client.is_connected():
+        return
+
+    text = build_channel_read_text(message)
+    if not text:
+        return
+
+    try:
+        await enqueue_tts(message.guild, message.channel.id, text, message.author.display_name)
+    except Exception as exc:
+        await message.channel.send(f"자동 읽기 중 오류가 났어: {exc}")
 
 
 @bot.command(name="ping")
@@ -204,26 +336,164 @@ async def say(ctx: commands.Context, *, text: str | None = None) -> None:
 
     try:
         await ensure_voice_client(ctx)
-        audio_path = await synthesize_tts(clean_text, TTS_VOICE)
+        queue_size = await enqueue_tts(ctx.guild, ctx.channel.id, clean_text, ctx.author.display_name)
     except Exception as exc:
         await ctx.reply(f"TTS 준비 중 오류가 났어: {exc}")
         return
 
     state = get_guild_state(ctx.guild.id)
+    if state.current_item is None and queue_size == 1:
+        await ctx.reply(f"바로 읽을게: {clean_text[:100]}")
+    else:
+        await ctx.reply(f"대기열에 추가했어. 현재 대기: {queue_size}개")
+
+
+@bot.command(name="setreadchannel")
+@commands.has_permissions(manage_guild=True)
+async def set_read_channel(ctx: commands.Context, channel: discord.TextChannel | None = None) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    target_channel = channel or ctx.channel
+    config = get_guild_config(ctx.guild.id)
+    config["read_channel_id"] = target_channel.id
+    save_settings()
+    await ctx.reply(f"이제 {target_channel.mention} 채널 메시지를 자동으로 읽을게.")
+
+
+@bot.command(name="clearreadchannel")
+@commands.has_permissions(manage_guild=True)
+async def clear_read_channel(ctx: commands.Context) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    config["read_channel_id"] = None
+    save_settings()
+    await ctx.reply("자동 읽기 채널 설정을 해제했어.")
+
+
+@bot.command(name="readchannel")
+async def read_channel_status(ctx: commands.Context) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    channel_id = config.get("read_channel_id")
+    if not channel_id:
+        await ctx.reply("자동 읽기 채널이 아직 설정되지 않았어.")
+        return
+
+    channel = ctx.guild.get_channel(channel_id)
+    if not channel:
+        await ctx.reply(f"저장된 채널 ID는 {channel_id}인데 지금 서버에서 찾지 못했어.")
+        return
+
+    await ctx.reply(f"현재 자동 읽기 채널은 {channel.mention} 이야.")
+
+
+@bot.command(name="engines")
+async def engines(ctx: commands.Context) -> None:
+    lines = ["사용 가능한 TTS 엔진:"]
+    for engine_key, info in SUPPORTED_ENGINES.items():
+        lines.append(f"- {engine_key}: {info['label']}")
+    await ctx.reply("\n".join(lines))
+
+
+@bot.command(name="voices")
+async def voices(ctx: commands.Context, engine: str | None = None) -> None:
+    target_engine = engine or get_guild_config(ctx.guild.id)["tts_engine"] if ctx.guild else DEFAULT_TTS_ENGINE
+    if target_engine not in SUPPORTED_ENGINES:
+        await ctx.reply(f"지원하지 않는 엔진이야: {target_engine}")
+        return
+
+    lines = [f"{target_engine} 엔진에서 사용 가능한 보이스:"]
+    for voice_id, provider_voice in SUPPORTED_ENGINES[target_engine]["voices"].items():
+        lines.append(f"- {voice_id}: {provider_voice}")
+    await ctx.reply("\n".join(lines[:25]))
+
+
+@bot.command(name="setengine")
+@commands.has_permissions(manage_guild=True)
+async def set_engine(ctx: commands.Context, engine: str) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    engine = engine.strip().lower()
+    if engine not in SUPPORTED_ENGINES:
+        await ctx.reply(f"지원하지 않는 엔진이야. 가능한 값: {', '.join(SUPPORTED_ENGINES)}")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    config["tts_engine"] = engine
+    config["voice_id"] = next(iter(SUPPORTED_ENGINES[engine]["voices"]))
+    save_settings()
+    await ctx.reply(
+        f"TTS 엔진을 {engine}로 바꿨어. 기본 보이스는 {describe_voice(config['tts_engine'], config['voice_id'])} 로 설정했어."
+    )
+
+
+@bot.command(name="setvoice")
+@commands.has_permissions(manage_guild=True)
+async def set_voice(ctx: commands.Context, voice_id: str) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    engine = config["tts_engine"]
+    if voice_id not in SUPPORTED_ENGINES[engine]["voices"]:
+        await ctx.reply(f"지원하지 않는 voice_id야. `!voices`로 확인해 줘.")
+        return
+
+    config["voice_id"] = voice_id
+    save_settings()
+    await ctx.reply(f"보이스를 {describe_voice(engine, voice_id)} 로 바꿨어.")
+
+
+@bot.command(name="voice")
+async def voice_status(ctx: commands.Context) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    await ctx.reply(
+        f"현재 엔진: {config['tts_engine']}\n현재 보이스: {describe_voice(config['tts_engine'], config['voice_id'])}"
+    )
+
+
+@bot.command(name="sample")
+async def sample(ctx: commands.Context, voice_id: str | None = None, *, text: str | None = None) -> None:
+    if not ctx.guild:
+        await ctx.reply("서버에서만 사용할 수 있어.")
+        return
+
+    config = get_guild_config(ctx.guild.id)
+    target_voice = voice_id or config["voice_id"]
+    sample_text = text or "안녕하세요. 이건 디스코드 TTS 봇 음성 샘플입니다."
+
+    try:
+        await ensure_voice_client(ctx)
+        audio_path = await synthesize_tts(sanitize_text(sample_text), config["tts_engine"], target_voice)
+    except Exception as exc:
+        await ctx.reply(f"샘플 생성 중 오류가 났어: {exc}")
+        return
+
+    state = get_guild_state(ctx.guild.id)
     item = TTSItem(
-        text=clean_text,
+        text=sample_text,
         author_name=ctx.author.display_name,
         text_channel_id=ctx.channel.id,
         file_path=audio_path,
     )
     await state.queue.put(item)
     ensure_worker(ctx.guild.id)
-
-    queue_size = state.queue.qsize()
-    if state.current_item is None and queue_size == 1:
-        await ctx.reply(f"바로 읽을게: {clean_text[:100]}")
-    else:
-        await ctx.reply(f"대기열에 추가했어. 현재 대기: {queue_size}개")
+    await ctx.reply(f"샘플 보이스를 재생할게: {describe_voice(config['tts_engine'], target_voice)}")
 
 
 @bot.command(name="skip")
@@ -290,10 +560,30 @@ async def help_command(ctx: commands.Context) -> None:
         f"- {COMMAND_PREFIX}join\n"
         f"- {COMMAND_PREFIX}leave\n"
         f"- {COMMAND_PREFIX}say <문장>\n"
+        f"- {COMMAND_PREFIX}setreadchannel [#채널]\n"
+        f"- {COMMAND_PREFIX}clearreadchannel\n"
+        f"- {COMMAND_PREFIX}readchannel\n"
+        f"- {COMMAND_PREFIX}engines\n"
+        f"- {COMMAND_PREFIX}voices [engine]\n"
+        f"- {COMMAND_PREFIX}setengine <engine>\n"
+        f"- {COMMAND_PREFIX}setvoice <voice_id>\n"
+        f"- {COMMAND_PREFIX}voice\n"
+        f"- {COMMAND_PREFIX}sample [voice_id] [문장]\n"
         f"- {COMMAND_PREFIX}skip\n"
         f"- {COMMAND_PREFIX}stop\n"
         f"- {COMMAND_PREFIX}queue"
     )
+
+
+@set_read_channel.error
+@clear_read_channel.error
+@set_engine.error
+@set_voice.error
+async def admin_command_error(ctx: commands.Context, error: Exception) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.reply("이 명령어는 서버 관리 권한이 있어야 써.")
+        return
+    await ctx.reply(f"명령 처리 중 오류가 났어: {error}")
 
 
 bot.run(DISCORD_TOKEN)
