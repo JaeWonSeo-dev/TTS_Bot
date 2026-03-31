@@ -78,6 +78,11 @@ guild_states: dict[int, GuildAudioState] = {}
 guild_settings: dict[str, dict] = {}
 
 
+def debug_log(message: str) -> None:
+    if DEBUG_LOG:
+        print(f"[DEBUG] {message}")
+
+
 def load_settings() -> dict[str, dict]:
     if not CONFIG_PATH.exists():
         return {}
@@ -279,42 +284,50 @@ async def on_message(message: discord.Message) -> None:
     if message.author.bot or not message.guild:
         return
 
+    debug_log(
+        f"on_message guild={message.guild.id} channel={message.channel.id} author={message.author.display_name} content={message.content[:80]!r}"
+    )
     await bot.process_commands(message)
 
     config = get_guild_config(message.guild.id)
     read_channel_id = config.get("read_channel_id")
-    if not read_channel_id or message.channel.id != read_channel_id:
+    if not read_channel_id:
+        debug_log("skip: no read_channel_id configured")
+        return
+
+    if message.channel.id != read_channel_id:
+        debug_log(f"skip: channel {message.channel.id} != configured read channel {read_channel_id}")
         return
 
     if message.content.startswith(COMMAND_PREFIX):
+        debug_log("skip: command message in read channel")
         return
 
     if not message.content.strip():
+        debug_log("skip: empty message content")
         return
 
-    voice_client = message.guild.voice_client
-    if not voice_client or not voice_client.is_connected():
-        if config.get("autojoin"):
-            voice_state = getattr(message.author, "voice", None)
-            if voice_state and voice_state.channel:
-                try:
-                    await voice_state.channel.connect(timeout=20, reconnect=True)
-                    voice_client = message.guild.voice_client
-                except Exception as exc:
-                    await message.channel.send(f"자동 입장 중 오류가 났어: {exc}")
-                    return
-            else:
-                return
-        else:
-            return
+    voice_state = getattr(message.author, "voice", None)
+    if not voice_state or not voice_state.channel:
+        debug_log("skip: author is not in a voice channel")
+        return
+
+    try:
+        await connect_to_member_voice_channel(message.guild, message.author)
+    except Exception as exc:
+        debug_log(f"voice connect failed: {exc}")
+        await message.channel.send(f"음성 채널 자동 연결 중 오류가 났어: {exc}")
+        return
 
     text = build_channel_read_text(message)
     if not text:
+        debug_log("skip: build_channel_read_text returned empty")
         return
 
     try:
         await enqueue_tts(message.guild, message.channel.id, text, message.author.display_name)
     except Exception as exc:
+        debug_log(f"enqueue failed: {exc}")
         await message.channel.send(f"자동 읽기 중 오류가 났어: {exc}")
 
 

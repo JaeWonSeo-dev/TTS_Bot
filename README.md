@@ -104,3 +104,4 @@ python main.py
 ```
 
 `.env.example`을 복사해서 `.env`를 만들고 토큰/FFmpeg 경로를 넣으면 돼.
+디버깅이 필요하면 `DEBUG_LOG=true` 상태로 실행해서 콘솔 로그를 확인하면 돼.
