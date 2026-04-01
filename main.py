@@ -323,7 +323,14 @@ def build_channel_read_text(message: discord.Message) -> str:
     return content
 
 
-async def enqueue_tts(guild: discord.Guild, channel_id: int, text: str, author_name: str) -> int:
+async def enqueue_tts(
+    guild: discord.Guild,
+    channel_id: int,
+    text: str,
+    author_name: str,
+    *,
+    start_worker: bool = True,
+) -> int:
     config = get_guild_config(guild.id)
     voice_id = choose_voice_id_for_text(config, text)
     audio_path = await synthesize_tts(text, config["tts_engine"], voice_id)
@@ -336,7 +343,8 @@ async def enqueue_tts(guild: discord.Guild, channel_id: int, text: str, author_n
         file_path=audio_path,
     )
     await state.queue.put(item)
-    ensure_worker(guild.id)
+    if start_worker:
+        ensure_worker(guild.id)
     debug_log(f"queue size now {state.queue.qsize()} for guild={guild.id}")
     return state.queue.qsize()
 
@@ -398,7 +406,13 @@ async def on_message(message: discord.Message) -> None:
         return
 
     enqueue_task = asyncio.create_task(
-        enqueue_tts(message.guild, message.channel.id, text, message.author.display_name)
+        enqueue_tts(
+            message.guild,
+            message.channel.id,
+            text,
+            message.author.display_name,
+            start_worker=False,
+        )
     )
 
     try:
@@ -413,6 +427,7 @@ async def on_message(message: discord.Message) -> None:
 
     try:
         await enqueue_task
+        ensure_worker(message.guild.id)
     except Exception as exc:
         debug_log(f"enqueue failed: {exc}")
         await message.channel.send(f"자동 읽기 중 오류가 났어: {exc}")
