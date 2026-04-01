@@ -21,6 +21,7 @@ DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "edge")
 DEFAULT_TTS_VOICE = os.getenv("TTS_VOICE", "ko-KR-SunHiNeural")
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 MAX_TTS_LENGTH = int(os.getenv("MAX_TTS_LENGTH", "300"))
+DEBUG_LOG = os.getenv("DEBUG_LOG", "false").strip().lower() in {"1", "true", "yes", "on"}
 TEMP_DIR = Path(os.getenv("TTS_TEMP_DIR", tempfile.gettempdir())) / "discord_tts_bot"
 DATA_DIR = Path(os.getenv("TTS_DATA_DIR", "data"))
 SAMPLES_DIR = Path(os.getenv("TTS_SAMPLES_DIR", "voice_samples"))
@@ -161,27 +162,67 @@ async def synthesize_tts(text: str, engine: str, voice_id: str) -> Path:
     if engine == "edge":
         provider_voice = resolve_voice(engine, voice_id)
         communicate = edge_tts.Communicate(text=text, voice=provider_voice)
-        await communicate.save(str(output_path))
+        try:
+            await communicate.save(str(output_path))
+        except Exception as exc:
+            with contextlib.suppress(FileNotFoundError, PermissionError):
+                output_path.unlink()
+
+            message = str(exc)
+            if "403" in message:
+                raise RuntimeError(
+                    "Edge TTS 요청이 차단됐어(HTTP 403). edge-tts를 최신 버전으로 업데이트하고 다시 실행해 봐."
+                ) from exc
+            raise RuntimeError(f"TTS 합성 실패: {exc}") from exc
         return output_path
 
     raise RuntimeError(f"아직 구현되지 않은 엔진이야: {engine}")
+
+
+async def connect_voice_channel(guild: discord.Guild, target_channel: discord.VoiceChannel | discord.StageChannel) -> discord.VoiceClient:
+    voice_client = guild.voice_client
+
+    if voice_client and voice_client.channel == target_channel and voice_client.is_connected():
+        return voice_client
+
+    if voice_client:
+        try:
+            if voice_client.is_connected() and voice_client.channel != target_channel:
+                await voice_client.move_to(target_channel)
+                return voice_client
+        except Exception as exc:
+            debug_log(f"voice move failed, resetting voice client: {exc}")
+
+        with contextlib.suppress(Exception):
+            await voice_client.disconnect(force=True)
+
+        await asyncio.sleep(0.5)
+
+    try:
+        return await target_channel.connect(timeout=20, reconnect=True)
+    except Exception as first_exc:
+        debug_log(f"voice connect first attempt failed: {first_exc}")
+        stale_voice_client = guild.voice_client
+        if stale_voice_client:
+            with contextlib.suppress(Exception):
+                await stale_voice_client.disconnect(force=True)
+            await asyncio.sleep(1.0)
+        return await target_channel.connect(timeout=20, reconnect=True)
 
 
 async def ensure_voice_client(ctx: commands.Context) -> discord.VoiceClient:
     if not ctx.author.voice or not ctx.author.voice.channel:
         raise RuntimeError("먼저 음성 채널에 들어가 주세요.")
 
-    target_channel = ctx.author.voice.channel
-    voice_client = ctx.voice_client
+    return await connect_voice_channel(ctx.guild, ctx.author.voice.channel)
 
-    if voice_client and voice_client.channel != target_channel:
-        await voice_client.move_to(target_channel)
-        return voice_client
 
-    if voice_client:
-        return voice_client
+async def connect_to_member_voice_channel(guild: discord.Guild, member: discord.Member) -> discord.VoiceClient:
+    voice_state = getattr(member, "voice", None)
+    if not voice_state or not voice_state.channel:
+        raise RuntimeError("사용자가 음성 채널에 없어 자동 연결할 수 없어.")
 
-    return await target_channel.connect(timeout=20, reconnect=True)
+    return await connect_voice_channel(guild, voice_state.channel)
 
 
 async def cleanup_file(path: Path) -> None:
