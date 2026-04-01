@@ -117,7 +117,7 @@ def get_guild_config(guild_id: int) -> dict:
             "tts_engine": DEFAULT_TTS_ENGINE,
             "voice_id": get_default_voice_id(),
             "autojoin": False,
-            "xsaid": True,
+            "xsaid": False,
             "multilang": True,
         }
         save_settings()
@@ -318,7 +318,7 @@ def sanitize_text(text: str) -> str:
 def build_channel_read_text(message: discord.Message) -> str:
     config = get_guild_config(message.guild.id)
     content = sanitize_text(message.content)
-    if config.get("xsaid", True):
+    if config.get("xsaid", False):
         return f"{message.author.display_name}. {content}"
     return content
 
@@ -392,20 +392,27 @@ async def on_message(message: discord.Message) -> None:
         debug_log("skip: author is not in a voice channel")
         return
 
-    try:
-        await connect_to_member_voice_channel(message.guild, message.author)
-    except Exception as exc:
-        debug_log(f"voice connect failed: {exc}")
-        await message.channel.send(f"음성 채널 자동 연결 중 오류가 났어: {exc}")
-        return
-
     text = build_channel_read_text(message)
     if not text:
         debug_log("skip: build_channel_read_text returned empty")
         return
 
+    enqueue_task = asyncio.create_task(
+        enqueue_tts(message.guild, message.channel.id, text, message.author.display_name)
+    )
+
     try:
-        await enqueue_tts(message.guild, message.channel.id, text, message.author.display_name)
+        await connect_to_member_voice_channel(message.guild, message.author)
+    except Exception as exc:
+        enqueue_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await enqueue_task
+        debug_log(f"voice connect failed: {exc}")
+        await message.channel.send(f"음성 채널 자동 연결 중 오류가 났어: {exc}")
+        return
+
+    try:
+        await enqueue_task
     except Exception as exc:
         debug_log(f"enqueue failed: {exc}")
         await message.channel.send(f"자동 읽기 중 오류가 났어: {exc}")
@@ -492,8 +499,9 @@ async def set_read_channel(ctx: commands.Context, channel: discord.TextChannel |
     target_channel = channel or ctx.channel
     config = get_guild_config(ctx.guild.id)
     config["read_channel_id"] = target_channel.id
+    config["xsaid"] = False
     save_settings()
-    await ctx.reply(f"이제 {target_channel.mention} 채널 메시지를 자동으로 읽을게.")
+    await ctx.reply(f"이제 {target_channel.mention} 채널 메시지를 자동으로 읽을게. 닉네임 읽기는 기본으로 꺼둘게.")
 
 
 @bot.command(name="clearreadchannel")
