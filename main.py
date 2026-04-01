@@ -9,8 +9,14 @@ from pathlib import Path
 
 import discord
 import edge_tts
+from discord.errors import ConnectionClosed
 from discord.ext import commands
 from dotenv import load_dotenv
+
+try:
+    import davey  # type: ignore
+except ImportError:
+    davey = None  # type: ignore
 
 
 load_dotenv()
@@ -200,6 +206,15 @@ async def connect_voice_channel(guild: discord.Guild, target_channel: discord.Vo
 
     try:
         return await target_channel.connect(timeout=20, reconnect=True)
+    except ConnectionClosed as exc:
+        code = getattr(exc, "code", None)
+        if code == 4017:
+            raise RuntimeError(
+                "Discord 음성 서버가 DAVE(E2EE) 프로토콜을 요구해서 연결을 거부했어 (4017). "
+                "봇 프로세스를 완전히 종료한 뒤 다시 실행해서 최신 discord.py/davey가 실제로 로드되게 해야 해. "
+                "그래도 계속 4017이면 현재 음성 스택으로는 이 채널 연결이 안 되는 상태야."
+            ) from exc
+        debug_log(f"voice connect first attempt failed: {exc}")
     except Exception as first_exc:
         debug_log(f"voice connect first attempt failed: {first_exc}")
         stale_voice_client = guild.voice_client
@@ -207,7 +222,24 @@ async def connect_voice_channel(guild: discord.Guild, target_channel: discord.Vo
             with contextlib.suppress(Exception):
                 await stale_voice_client.disconnect(force=True)
             await asyncio.sleep(1.0)
-        return await target_channel.connect(timeout=20, reconnect=True)
+        try:
+            return await target_channel.connect(timeout=20, reconnect=True)
+        except ConnectionClosed as exc:
+            code = getattr(exc, "code", None)
+            if code == 4017:
+                raise RuntimeError(
+                    "Discord 음성 서버가 DAVE(E2EE) 프로토콜을 요구해서 연결을 거부했어 (4017). "
+                    "봇 프로세스를 완전히 종료한 뒤 다시 실행해서 최신 discord.py/davey가 실제로 로드되게 해야 해. "
+                    "그래도 계속 4017이면 현재 음성 스택으로는 이 채널 연결이 안 되는 상태야."
+                ) from exc
+            raise
+
+    stale_voice_client = guild.voice_client
+    if stale_voice_client:
+        with contextlib.suppress(Exception):
+            await stale_voice_client.disconnect(force=True)
+        await asyncio.sleep(1.0)
+    return await target_channel.connect(timeout=20, reconnect=True)
 
 
 async def ensure_voice_client(ctx: commands.Context) -> discord.VoiceClient:
@@ -319,6 +351,12 @@ async def on_ready() -> None:
     global guild_settings
     guild_settings = load_settings()
     print(f"Logged in as {bot.user}")
+    print(
+        "[startup] "
+        f"discord.py={discord.__version__} "
+        f"edge_tts={getattr(edge_tts, '__version__', 'unknown')} "
+        f"davey={getattr(davey, '__version__', 'missing') if davey else 'missing'}"
+    )
 
 
 @bot.event
