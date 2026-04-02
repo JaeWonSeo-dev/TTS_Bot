@@ -114,6 +114,29 @@ voice_samples/
 - 잡음/에코 적음
 - 한국어/영어 둘 다 가능
 
+## B 방식 학습 구조
+
+이제 프로젝트 안에 학습 기반 화자 등록을 위한 기본 골격도 들어 있다.
+
+```text
+datasets/
+training/
+models/
+trained_voices/
+exports/
+docs/TRAINING_GUIDE.md
+```
+
+기본 흐름:
+
+```bash
+python training/validate_dataset.py --voice-id sample_speaker
+python training/prepare_dataset.py --voice-id sample_speaker
+python training/train_voice.py --voice-id sample_speaker
+```
+
+실제 화자를 학습하려면 `datasets/<voice_id>/wavs/*.wav` 와 `metadata.csv`를 준비해야 한다.
+
 ## 설정 파일
 
 서버별 설정은 아래 파일에 저장돼:

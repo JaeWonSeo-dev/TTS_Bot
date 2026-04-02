@@ -1,0 +1,6 @@
+{
+  "notes": "placeholder config for XTTS fine-tuning. Replace with a real Coqui XTTS training config before execute.",
+  "dataset_format": "metadata.csv with path|text entries",
+  "recommended_language": "ko",
+  "output_sample_rate": 24000
+}
