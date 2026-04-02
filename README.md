@@ -72,6 +72,7 @@
 
 현재 기본 탑재 엔진:
 - `edge` : Microsoft Edge TTS
+- `xtts` : XTTS v2 기반 참조 음성 voice cloning TTS
 
 기본 보이스 별칭:
 - `ko_female_1` -> `ko-KR-SunHiNeural`
@@ -80,6 +81,38 @@
 - `ko_male_2` -> `ko-KR-BongJinNeural`
 - `en_female_1` -> `en-US-JennyNeural`
 - `en_male_1` -> `en-US-GuyNeural`
+
+### XTTS 화자 등록 방식
+
+XTTS를 쓰려면 참조 음성을 아래처럼 넣으면 돼:
+
+```text
+voice_samples/
+  jaewon/
+    ref.wav
+```
+
+또는 단일 파일도 가능해:
+
+```text
+voice_samples/
+  jaewon.wav
+```
+
+그 다음:
+
+```text
+!voices xtts
+!setengine xtts
+!setvoice jaewon
+```
+
+권장 참조 음성 조건:
+- 10~60초 WAV
+- 한 사람만 말하는 음성
+- 배경음악 없음
+- 잡음/에코 적음
+- 한국어/영어 둘 다 가능
 
 ## 설정 파일
 
@@ -104,4 +137,5 @@ python main.py
 ```
 
 `.env.example`을 복사해서 `.env`를 만들고 토큰/FFmpeg 경로를 넣으면 돼.
+XTTS를 쓸 거면 첫 실행 전에 추가로 모델 다운로드 시간이 걸릴 수 있어.
 디버깅이 필요하면 `DEBUG_LOG=true` 상태로 실행해서 콘솔 로그를 확인하면 돼.

@@ -2,13 +2,17 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import tempfile
 import uuid
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import discord
 import edge_tts
+import numpy as np
+import soundfile as sf
 from discord.errors import ConnectionClosed
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -25,6 +29,10 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "edge")
 DEFAULT_TTS_VOICE = os.getenv("TTS_VOICE", "ko-KR-SunHiNeural")
+XTTS_MODEL_NAME = os.getenv("XTTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2")
+XTTS_USE_CUDA = os.getenv("XTTS_USE_CUDA", "true").strip().lower() in {"1", "true", "yes", "on"}
+XTTS_DEFAULT_LANGUAGE = os.getenv("XTTS_DEFAULT_LANGUAGE", "ko")
+XTTS_MAX_CHUNK_LENGTH = int(os.getenv("XTTS_MAX_CHUNK_LENGTH", "180"))
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 MAX_TTS_LENGTH = int(os.getenv("MAX_TTS_LENGTH", "300"))
 DEBUG_LOG = os.getenv("DEBUG_LOG", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -48,7 +56,15 @@ SUPPORTED_ENGINES = {
             "ko": "ko_female_1",
             "en": "en_female_1",
         },
-    }
+    },
+    "xtts": {
+        "label": "XTTS v2 Voice Cloning",
+        "voices": {},
+        "language_defaults": {
+            "ko": "sample_speaker",
+            "en": "sample_speaker",
+        },
+    },
 }
 
 if not DISCORD_TOKEN:
@@ -85,9 +101,142 @@ guild_states: dict[int, GuildAudioState] = {}
 guild_settings: dict[str, dict] = {}
 
 
+KOREAN_NUMERALS = ["", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"]
+KOREAN_SMALL_UNITS = ["", "십", "백", "천"]
+KOREAN_LARGE_UNITS = ["", "만", "억", "조"]
+KOREAN_TERM_MAP = {
+    "AI": "에이아이",
+    "TTS": "티티에스",
+    "API": "에이피아이",
+    "GPU": "지피유",
+    "CPU": "씨피유",
+    "LLM": "엘엘엠",
+}
+
+
 def debug_log(message: str) -> None:
     if DEBUG_LOG:
         print(f"[DEBUG] {message}")
+
+
+def discover_xtts_voices() -> dict[str, str]:
+    voices: dict[str, str] = {}
+    if not SAMPLES_DIR.exists():
+        return voices
+
+    for entry in sorted(SAMPLES_DIR.iterdir()):
+        if entry.is_dir():
+            ref_wav = entry / "ref.wav"
+            if ref_wav.exists():
+                voices[entry.name] = str(ref_wav)
+        elif entry.is_file() and entry.suffix.lower() == ".wav":
+            voices[entry.stem] = str(entry)
+    return voices
+
+
+def refresh_xtts_voices() -> None:
+    xtts_voices = discover_xtts_voices()
+    SUPPORTED_ENGINES["xtts"]["voices"] = xtts_voices
+    if xtts_voices:
+        first_voice = next(iter(xtts_voices))
+        SUPPORTED_ENGINES["xtts"]["language_defaults"] = {
+            "ko": first_voice,
+            "en": first_voice,
+        }
+
+
+def _int_to_korean(number: int) -> str:
+    if number == 0:
+        return "영"
+
+    parts: list[str] = []
+    unit_index = 0
+    while number > 0:
+        chunk = number % 10000
+        if chunk:
+            chunk_text: list[str] = []
+            digits = list(map(int, str(chunk)))[::-1]
+            for idx, digit in enumerate(digits):
+                if digit == 0:
+                    continue
+                numeral = KOREAN_NUMERALS[digit]
+                if digit == 1 and idx > 0:
+                    numeral = ""
+                chunk_text.append(f"{numeral}{KOREAN_SMALL_UNITS[idx]}")
+            parts.append("".join(reversed(chunk_text)) + KOREAN_LARGE_UNITS[unit_index])
+        number //= 10000
+        unit_index += 1
+    return "".join(reversed(parts))
+
+
+def normalize_tts_text(text: str, language: str) -> str:
+    text = text.strip()
+    text = re.sub(r"[\U00010000-\U0010ffff]", " ", text)
+    text = text.replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+
+    if language == "ko":
+        for source, target in KOREAN_TERM_MAP.items():
+            text = re.sub(rf"\b{re.escape(source)}\b", target, text)
+        text = re.sub(r"\d+", lambda match: _int_to_korean(int(match.group(0))), text)
+    else:
+        text = text.replace("&", " and ").replace("@", " at ")
+        text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+def split_tts_chunks(text: str, max_length: int) -> list[str]:
+    if len(text) <= max_length:
+        return [text]
+
+    sentences = re.split(r"(?<=[.!?。！？])\s+", text)
+    chunks: list[str] = []
+    current = ""
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        if len(sentence) > max_length:
+            subparts = re.split(r"(?<=[,;:])\s+", sentence)
+            if len(subparts) == 1:
+                subparts = [sentence[i:i + max_length] for i in range(0, len(sentence), max_length)]
+            for subpart in subparts:
+                subpart = subpart.strip()
+                if not subpart:
+                    continue
+                if current:
+                    chunks.append(current.strip())
+                    current = ""
+                chunks.append(subpart)
+            continue
+
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if len(candidate) <= max_length:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = sentence
+
+    if current:
+        chunks.append(current.strip())
+
+    return chunks or [text]
+
+
+@lru_cache(maxsize=1)
+def get_xtts_model():
+    try:
+        from TTS.api import TTS
+    except ImportError as exc:
+        raise RuntimeError("XTTS 패키지가 설치되지 않았어. `pip install -r requirements.txt` 먼저 해 줘.") from exc
+
+    device = "cuda" if XTTS_USE_CUDA else "cpu"
+    model = TTS(XTTS_MODEL_NAME)
+    return model.to(device)
 
 
 def load_settings() -> dict[str, dict]:
@@ -120,7 +269,10 @@ def get_guild_config(guild_id: int) -> dict:
             "xsaid": False,
             "multilang": True,
         }
+        ensure_valid_voice_config(guild_settings[key])
         save_settings()
+    else:
+        ensure_valid_voice_config(guild_settings[key])
     return guild_settings[key]
 
 
@@ -162,10 +314,42 @@ def choose_voice_id_for_text(config: dict, text: str) -> str:
     return SUPPORTED_ENGINES[engine]["language_defaults"].get(language, config["voice_id"])
 
 
-async def synthesize_tts(text: str, engine: str, voice_id: str) -> Path:
-    output_path = TEMP_DIR / f"tts_{uuid.uuid4().hex}.mp3"
+def _synthesize_xtts_sync(text: str, voice_id: str, output_path: Path) -> None:
+    refresh_xtts_voices()
+    reference_wav = resolve_voice("xtts", voice_id)
+    language = detect_language(text) or XTTS_DEFAULT_LANGUAGE
+    normalized = normalize_tts_text(text, language)
+    chunks = split_tts_chunks(normalized, XTTS_MAX_CHUNK_LENGTH)
+    model = get_xtts_model()
 
+    rendered: list[np.ndarray] = []
+    sample_rate = 24000
+
+    for chunk in chunks:
+        wav = model.tts(
+            text=chunk,
+            speaker_wav=reference_wav,
+            language=language,
+            speed=1.0,
+        )
+        rendered.append(np.asarray(wav, dtype=np.float32))
+
+    if not rendered:
+        raise RuntimeError("XTTS가 오디오를 생성하지 못했어.")
+
+    silence = np.zeros(int(sample_rate * 0.15), dtype=np.float32)
+    merged: list[np.ndarray] = []
+    for index, part in enumerate(rendered):
+        merged.append(part)
+        if index < len(rendered) - 1:
+            merged.append(silence)
+
+    sf.write(output_path, np.concatenate(merged), sample_rate)
+
+
+async def synthesize_tts(text: str, engine: str, voice_id: str) -> Path:
     if engine == "edge":
+        output_path = TEMP_DIR / f"tts_{uuid.uuid4().hex}.mp3"
         provider_voice = resolve_voice(engine, voice_id)
         communicate = edge_tts.Communicate(text=text, voice=provider_voice)
         try:
@@ -180,6 +364,16 @@ async def synthesize_tts(text: str, engine: str, voice_id: str) -> Path:
                     "Edge TTS 요청이 차단됐어(HTTP 403). edge-tts를 최신 버전으로 업데이트하고 다시 실행해 봐."
                 ) from exc
             raise RuntimeError(f"TTS 합성 실패: {exc}") from exc
+        return output_path
+
+    if engine == "xtts":
+        output_path = TEMP_DIR / f"tts_{uuid.uuid4().hex}.wav"
+        try:
+            await asyncio.to_thread(_synthesize_xtts_sync, text, voice_id, output_path)
+        except Exception as exc:
+            with contextlib.suppress(FileNotFoundError, PermissionError):
+                output_path.unlink()
+            raise RuntimeError(f"XTTS 합성 실패: {exc}") from exc
         return output_path
 
     raise RuntimeError(f"아직 구현되지 않은 엔진이야: {engine}")
@@ -354,9 +548,17 @@ def describe_voice(engine: str, voice_id: str) -> str:
     return f"{voice_id} ({provider_voice})"
 
 
+def ensure_valid_voice_config(config: dict) -> None:
+    engine = config["tts_engine"]
+    available_voices = SUPPORTED_ENGINES[engine]["voices"]
+    if available_voices and config["voice_id"] not in available_voices:
+        config["voice_id"] = next(iter(available_voices))
+
+
 @bot.event
 async def on_ready() -> None:
     global guild_settings
+    refresh_xtts_voices()
     guild_settings = load_settings()
     print(f"Logged in as {bot.user}")
     print(
@@ -567,8 +769,19 @@ async def voices(ctx: commands.Context, engine: str | None = None) -> None:
         await ctx.reply(f"지원하지 않는 엔진이야: {target_engine}")
         return
 
+    if target_engine == "xtts":
+        refresh_xtts_voices()
+
+    available_voices = SUPPORTED_ENGINES[target_engine]["voices"]
+    if not available_voices:
+        if target_engine == "xtts":
+            await ctx.reply("XTTS 화자가 아직 없어. `voice_samples/<voice_id>/ref.wav` 형태로 참조 음성을 넣어 줘.")
+            return
+        await ctx.reply("사용 가능한 보이스가 없어.")
+        return
+
     lines = [f"{target_engine} 엔진에서 사용 가능한 보이스:"]
-    for voice_id, provider_voice in SUPPORTED_ENGINES[target_engine]["voices"].items():
+    for voice_id, provider_voice in available_voices.items():
         lines.append(f"- {voice_id}: {provider_voice}")
     await ctx.reply("\n".join(lines[:25]))
 
@@ -584,6 +797,12 @@ async def set_engine(ctx: commands.Context, engine: str) -> None:
     if engine not in SUPPORTED_ENGINES:
         await ctx.reply(f"지원하지 않는 엔진이야. 가능한 값: {', '.join(SUPPORTED_ENGINES)}")
         return
+
+    if engine == "xtts":
+        refresh_xtts_voices()
+        if not SUPPORTED_ENGINES[engine]["voices"]:
+            await ctx.reply("XTTS 화자가 아직 없어. `voice_samples/<voice_id>/ref.wav`를 먼저 넣어 줘.")
+            return
 
     config = get_guild_config(ctx.guild.id)
     config["tts_engine"] = engine
