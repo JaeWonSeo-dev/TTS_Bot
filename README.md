@@ -130,12 +130,32 @@ docs/TRAINING_GUIDE.md
 기본 흐름:
 
 ```bash
+python training/ingest_samples.py --voice-id sample_speaker --language ko --auto-transcribe
 python training/validate_dataset.py --voice-id sample_speaker
 python training/prepare_dataset.py --voice-id sample_speaker
 python training/train_voice.py --voice-id sample_speaker
 ```
 
-실제 화자를 학습하려면 `datasets/<voice_id>/wavs/*.wav` 와 `metadata.csv`를 준비해야 한다.
+이제 raw 샘플만 아래 경로에 넣어두면 dataset 생성까지 자동으로 만들 수 있다.
+
+```text
+voice_samples/
+  sample_speaker/
+    clip_001.wav
+    clip_001.txt   # 있으면 우선 사용
+    clip_002.wav   # txt 없으면 --auto-transcribe 시 Whisper 전사
+```
+
+`training/ingest_samples.py`가 다음을 자동 처리한다:
+- `voice_samples/<voice_id>/` 스캔
+- 길이 조건에 맞는 오디오 선별
+- `.txt` 전사 우선 사용
+- 없으면 Whisper 자동 전사
+- `datasets/<voice_id>/wavs/*.wav` 생성
+- `datasets/<voice_id>/metadata.csv` 생성
+- `datasets/<voice_id>/speaker.json` 생성
+
+즉, 실제 화자를 학습하려고 할 때 이제는 raw 샘플을 특정 경로에 넣고 `ingest_samples.py`만 돌리면 학습 시작 전 단계까지 준비된다.
 
 ## 설정 파일
 

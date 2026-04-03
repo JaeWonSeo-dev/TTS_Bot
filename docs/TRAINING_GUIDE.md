@@ -2,6 +2,32 @@
 
 이 프로젝트의 B 방식 목표는 **화자별 데이터셋을 등록하고, 이후 그 화자 목소리로 안정적으로 TTS를 생성할 수 있는 구조**를 만드는 것이다.
 
+## 가장 간단한 시작 방법
+
+원본 샘플만 먼저 아래 경로에 넣어도 된다.
+
+```text
+voice_samples/
+  jaewon/
+    clip_001.wav
+    clip_001.txt
+    clip_002.wav
+    clip_003.wav
+```
+
+그 다음 아래 순서로 실행하면 된다.
+
+```bash
+python training/ingest_samples.py --voice-id jaewon --language ko --auto-transcribe
+python training/validate_dataset.py --voice-id jaewon
+python training/prepare_dataset.py --voice-id jaewon
+python training/train_voice.py --voice-id jaewon
+```
+
+- `.txt`가 있으면 그 전사를 우선 사용
+- `.txt`가 없으면 `--auto-transcribe`로 Whisper 자동 전사
+- `ingest_samples.py`가 `datasets/<voice_id>/` 구조를 자동 생성
+
 ## 권장 데이터셋 구조
 
 ```text
