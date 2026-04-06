@@ -80,6 +80,16 @@ python scripts/check_local_gpt_sovits_setup.py
 - API 기본 포트: `127.0.0.1:9880`
 - 아직 로컬 API 프로세스는 실행 전일 수 있음
 
+Windows 로컬 CPU 기준 의존성 설치(권장 우회 스크립트):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install_local_gpt_sovits_cpu.ps1
+```
+
+- 이 스크립트는 `pyopenjtalk`, `jieba_fast`, `opencc` 같은 Windows 빌드 이슈 패키지를 건너뛰고,
+- `onnxruntime-gpu` 대신 `onnxruntime`로 바꿔서,
+- 로컬 API를 띄우는 데 필요한 패키지 설치를 우선 진행한다.
+
 PowerShell에서 API 실행:
 
 ```powershell

@@ -227,6 +227,12 @@ python scripts/check_gpt_sovits_api.py --url http://127.0.0.1:9880/tts --method 
 python scripts/check_local_gpt_sovits_setup.py
 ```
 
+로컬 CPU 설치 래퍼:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install_local_gpt_sovits_cpu.ps1
+```
+
 API 실행 래퍼:
 
 ```powershell
