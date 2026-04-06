@@ -2,7 +2,31 @@
 
 이 폴더는 **A 방식 참조 음성** 또는 샘플 mp3/wav를 보관하는 용도야.
 
-## A 방식 참조 음성 예시
+## GPT-SoVITS용 권장 구조
+
+```text
+voice_samples/
+  jaewon/
+    ref.wav
+    prompt.txt
+    speaker.json   # 선택
+```
+
+- `ref.wav`: 대표 참조 음성
+- `prompt.txt`: `ref.wav` 안에서 실제로 말한 문장
+- `speaker.json`: 선택. `prompt_text`, `prompt_language`, `text_language` 저장 가능
+
+예시:
+
+```json
+{
+  "prompt_text": "안녕하세요. 저는 테스트용 샘플 화자입니다.",
+  "prompt_language": "ko",
+  "text_language": "ko"
+}
+```
+
+## XTTS용 간단 구조
 
 ```text
 voice_samples/

@@ -1,9 +1,12 @@
 import asyncio
+import base64
 import contextlib
 import json
 import os
 import re
 import tempfile
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -33,6 +36,10 @@ XTTS_MODEL_NAME = os.getenv("XTTS_MODEL_NAME", "tts_models/multilingual/multi-da
 XTTS_USE_CUDA = os.getenv("XTTS_USE_CUDA", "true").strip().lower() in {"1", "true", "yes", "on"}
 XTTS_DEFAULT_LANGUAGE = os.getenv("XTTS_DEFAULT_LANGUAGE", "ko")
 XTTS_MAX_CHUNK_LENGTH = int(os.getenv("XTTS_MAX_CHUNK_LENGTH", "180"))
+GPT_SOVITS_API_URL = os.getenv("GPT_SOVITS_API_URL", "http://127.0.0.1:9880/tts")
+GPT_SOVITS_DEFAULT_PROMPT_LANGUAGE = os.getenv("GPT_SOVITS_DEFAULT_PROMPT_LANGUAGE", "ko")
+GPT_SOVITS_DEFAULT_TEXT_LANGUAGE = os.getenv("GPT_SOVITS_DEFAULT_TEXT_LANGUAGE", "ko")
+GPT_SOVITS_MAX_CHUNK_LENGTH = int(os.getenv("GPT_SOVITS_MAX_CHUNK_LENGTH", "120"))
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 MAX_TTS_LENGTH = int(os.getenv("MAX_TTS_LENGTH", "300"))
 DEBUG_LOG = os.getenv("DEBUG_LOG", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -59,6 +66,14 @@ SUPPORTED_ENGINES = {
     },
     "xtts": {
         "label": "XTTS v2 Voice Cloning",
+        "voices": {},
+        "language_defaults": {
+            "ko": "sample_speaker",
+            "en": "sample_speaker",
+        },
+    },
+    "gpt_sovits": {
+        "label": "GPT-SoVITS Voice Cloning",
         "voices": {},
         "language_defaults": {
             "ko": "sample_speaker",
@@ -143,6 +158,58 @@ def refresh_xtts_voices() -> None:
             "ko": first_voice,
             "en": first_voice,
         }
+
+
+def discover_gpt_sovits_voices() -> dict[str, str]:
+    voices: dict[str, str] = {}
+    if not SAMPLES_DIR.exists():
+        return voices
+
+    for entry in sorted(SAMPLES_DIR.iterdir()):
+        if entry.is_dir() and (entry / "ref.wav").exists():
+            voices[entry.name] = str(entry)
+    return voices
+
+
+def refresh_gpt_sovits_voices() -> None:
+    gpt_sovits_voices = discover_gpt_sovits_voices()
+    SUPPORTED_ENGINES["gpt_sovits"]["voices"] = gpt_sovits_voices
+    if gpt_sovits_voices:
+        first_voice = next(iter(gpt_sovits_voices))
+        SUPPORTED_ENGINES["gpt_sovits"]["language_defaults"] = {
+            "ko": first_voice,
+            "en": first_voice,
+        }
+
+
+def load_gpt_sovits_voice_profile(voice_id: str) -> dict[str, str]:
+    refresh_gpt_sovits_voices()
+    voice_dir_value = resolve_voice("gpt_sovits", voice_id)
+    voice_dir = Path(voice_dir_value)
+    reference_wav = voice_dir / "ref.wav"
+    if not reference_wav.exists():
+        raise RuntimeError(f"GPT-SoVITS reference wav not found: {reference_wav}")
+
+    speaker_json_path = voice_dir / "speaker.json"
+    speaker_info: dict[str, str] = {}
+    if speaker_json_path.exists():
+        with speaker_json_path.open("r", encoding="utf-8") as f:
+            speaker_info = json.load(f)
+
+    prompt_text_path = voice_dir / "prompt.txt"
+    prompt_text = speaker_info.get("prompt_text", "").strip()
+    if not prompt_text and prompt_text_path.exists():
+        prompt_text = prompt_text_path.read_text(encoding="utf-8").strip()
+
+    prompt_language = speaker_info.get("prompt_language", GPT_SOVITS_DEFAULT_PROMPT_LANGUAGE).strip() or GPT_SOVITS_DEFAULT_PROMPT_LANGUAGE
+    text_language = speaker_info.get("text_language", speaker_info.get("language", GPT_SOVITS_DEFAULT_TEXT_LANGUAGE)).strip() or GPT_SOVITS_DEFAULT_TEXT_LANGUAGE
+
+    return {
+        "reference_wav": str(reference_wav),
+        "prompt_text": prompt_text,
+        "prompt_language": prompt_language,
+        "text_language": text_language,
+    }
 
 
 def _int_to_korean(number: int) -> str:
@@ -252,10 +319,18 @@ def save_settings() -> None:
 
 
 def get_default_voice_id() -> str:
-    for voice_id, provider_voice in SUPPORTED_ENGINES[DEFAULT_TTS_ENGINE]["voices"].items():
-        if provider_voice == DEFAULT_TTS_VOICE:
+    if DEFAULT_TTS_ENGINE == "xtts":
+        refresh_xtts_voices()
+    elif DEFAULT_TTS_ENGINE == "gpt_sovits":
+        refresh_gpt_sovits_voices()
+
+    engine_voices = SUPPORTED_ENGINES[DEFAULT_TTS_ENGINE]["voices"]
+    for voice_id, provider_voice in engine_voices.items():
+        if provider_voice == DEFAULT_TTS_VOICE or voice_id == DEFAULT_TTS_VOICE:
             return voice_id
-    return next(iter(SUPPORTED_ENGINES[DEFAULT_TTS_ENGINE]["voices"]))
+    if engine_voices:
+        return next(iter(engine_voices))
+    return "ko_female_1"
 
 
 def get_guild_config(guild_id: int) -> dict:
@@ -347,6 +422,94 @@ def _synthesize_xtts_sync(text: str, voice_id: str, output_path: Path) -> None:
     sf.write(output_path, np.concatenate(merged), sample_rate)
 
 
+def _decode_gpt_sovits_response(payload: bytes, content_type: str, output_path: Path) -> None:
+    lowered = (content_type or "").lower()
+    if "audio/" in lowered or lowered.startswith("application/octet-stream"):
+        output_path.write_bytes(payload)
+        return
+
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError("GPT-SoVITS 응답을 해석하지 못했어. 오디오 바이너리나 JSON 응답이 필요해.") from exc
+
+    audio_b64 = data.get("audio") or data.get("audio_base64") or data.get("wav_base64")
+    if audio_b64:
+        output_path.write_bytes(base64.b64decode(audio_b64))
+        return
+
+    audio_url = data.get("audio_url") or data.get("url")
+    if audio_url:
+        with urllib.request.urlopen(audio_url, timeout=120) as response:
+            output_path.write_bytes(response.read())
+        return
+
+    raise RuntimeError(f"GPT-SoVITS 응답에 오디오가 없어: {data}")
+
+
+def _synthesize_gpt_sovits_sync(text: str, voice_id: str, output_path: Path) -> None:
+    profile = load_gpt_sovits_voice_profile(voice_id)
+    language = detect_language(text) or profile["text_language"] or GPT_SOVITS_DEFAULT_TEXT_LANGUAGE
+    normalized = normalize_tts_text(text, language)
+    chunks = split_tts_chunks(normalized, GPT_SOVITS_MAX_CHUNK_LENGTH)
+
+    rendered: list[np.ndarray] = []
+    sample_rate = 32000
+
+    for chunk in chunks:
+        payload = {
+            "text": chunk,
+            "text_lang": language,
+            "ref_audio_path": profile["reference_wav"],
+            "prompt_lang": profile["prompt_language"],
+        }
+        if profile["prompt_text"]:
+            payload["prompt_text"] = profile["prompt_text"]
+
+        request = urllib.request.Request(
+            GPT_SOVITS_API_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                response_body = response.read()
+                response_type = response.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"GPT-SoVITS API 호출 실패 ({exc.code}): {detail or exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"GPT-SoVITS API에 연결하지 못했어: {GPT_SOVITS_API_URL}. 서버가 켜져 있는지 확인해 줘."
+            ) from exc
+
+        chunk_path = output_path.parent / f"{output_path.stem}_{uuid.uuid4().hex}.wav"
+        try:
+            _decode_gpt_sovits_response(response_body, response_type, chunk_path)
+            wav, chunk_rate = sf.read(chunk_path, dtype="float32")
+            if wav.ndim > 1:
+                wav = wav.mean(axis=1)
+            rendered.append(np.asarray(wav, dtype=np.float32))
+            sample_rate = int(chunk_rate)
+        finally:
+            with contextlib.suppress(FileNotFoundError, PermissionError):
+                chunk_path.unlink()
+
+    if not rendered:
+        raise RuntimeError("GPT-SoVITS가 오디오를 생성하지 못했어.")
+
+    silence = np.zeros(int(sample_rate * 0.12), dtype=np.float32)
+    merged: list[np.ndarray] = []
+    for index, part in enumerate(rendered):
+        merged.append(part)
+        if index < len(rendered) - 1:
+            merged.append(silence)
+
+    sf.write(output_path, np.concatenate(merged), sample_rate)
+
+
 async def synthesize_tts(text: str, engine: str, voice_id: str) -> Path:
     if engine == "edge":
         output_path = TEMP_DIR / f"tts_{uuid.uuid4().hex}.mp3"
@@ -374,6 +537,16 @@ async def synthesize_tts(text: str, engine: str, voice_id: str) -> Path:
             with contextlib.suppress(FileNotFoundError, PermissionError):
                 output_path.unlink()
             raise RuntimeError(f"XTTS 합성 실패: {exc}") from exc
+        return output_path
+
+    if engine == "gpt_sovits":
+        output_path = TEMP_DIR / f"tts_{uuid.uuid4().hex}.wav"
+        try:
+            await asyncio.to_thread(_synthesize_gpt_sovits_sync, text, voice_id, output_path)
+        except Exception as exc:
+            with contextlib.suppress(FileNotFoundError, PermissionError):
+                output_path.unlink()
+            raise RuntimeError(f"GPT-SoVITS 합성 실패: {exc}") from exc
         return output_path
 
     raise RuntimeError(f"아직 구현되지 않은 엔진이야: {engine}")
@@ -550,6 +723,11 @@ def describe_voice(engine: str, voice_id: str) -> str:
 
 def ensure_valid_voice_config(config: dict) -> None:
     engine = config["tts_engine"]
+    if engine == "xtts":
+        refresh_xtts_voices()
+    elif engine == "gpt_sovits":
+        refresh_gpt_sovits_voices()
+
     available_voices = SUPPORTED_ENGINES[engine]["voices"]
     if available_voices and config["voice_id"] not in available_voices:
         config["voice_id"] = next(iter(available_voices))
@@ -559,6 +737,7 @@ def ensure_valid_voice_config(config: dict) -> None:
 async def on_ready() -> None:
     global guild_settings
     refresh_xtts_voices()
+    refresh_gpt_sovits_voices()
     guild_settings = load_settings()
     print(f"Logged in as {bot.user}")
     print(
@@ -771,11 +950,16 @@ async def voices(ctx: commands.Context, engine: str | None = None) -> None:
 
     if target_engine == "xtts":
         refresh_xtts_voices()
+    elif target_engine == "gpt_sovits":
+        refresh_gpt_sovits_voices()
 
     available_voices = SUPPORTED_ENGINES[target_engine]["voices"]
     if not available_voices:
         if target_engine == "xtts":
             await ctx.reply("XTTS 화자가 아직 없어. `voice_samples/<voice_id>/ref.wav` 형태로 참조 음성을 넣어 줘.")
+            return
+        if target_engine == "gpt_sovits":
+            await ctx.reply("GPT-SoVITS 화자가 아직 없어. `voice_samples/<voice_id>/ref.wav`와 `prompt.txt` 또는 `speaker.json`을 넣어 줘.")
             return
         await ctx.reply("사용 가능한 보이스가 없어.")
         return
@@ -802,6 +986,11 @@ async def set_engine(ctx: commands.Context, engine: str) -> None:
         refresh_xtts_voices()
         if not SUPPORTED_ENGINES[engine]["voices"]:
             await ctx.reply("XTTS 화자가 아직 없어. `voice_samples/<voice_id>/ref.wav`를 먼저 넣어 줘.")
+            return
+    elif engine == "gpt_sovits":
+        refresh_gpt_sovits_voices()
+        if not SUPPORTED_ENGINES[engine]["voices"]:
+            await ctx.reply("GPT-SoVITS 화자가 아직 없어. `voice_samples/<voice_id>/ref.wav`와 `prompt.txt` 또는 `speaker.json`을 먼저 넣어 줘.")
             return
 
     config = get_guild_config(ctx.guild.id)
@@ -851,6 +1040,10 @@ async def set_male_voice(ctx: commands.Context) -> None:
         return
 
     config = get_guild_config(ctx.guild.id)
+    if config["tts_engine"] != "edge":
+        await ctx.reply("!male 명령은 edge 엔진 기본 보이스에서만 바로 쓸 수 있어. GPT-SoVITS는 `!voices`랑 `!setvoice`를 써 줘.")
+        return
+
     config["voice_id"] = "ko_male_1"
     save_settings()
     await ctx.reply(f"남성 보이스로 바꿨어: {describe_voice(config['tts_engine'], config['voice_id'])}")
@@ -864,6 +1057,10 @@ async def set_female_voice(ctx: commands.Context) -> None:
         return
 
     config = get_guild_config(ctx.guild.id)
+    if config["tts_engine"] != "edge":
+        await ctx.reply("!female 명령은 edge 엔진 기본 보이스에서만 바로 쓸 수 있어. GPT-SoVITS는 `!voices`랑 `!setvoice`를 써 줘.")
+        return
+
     config["voice_id"] = "ko_female_1"
     save_settings()
     await ctx.reply(f"여성 보이스로 바꿨어: {describe_voice(config['tts_engine'], config['voice_id'])}")

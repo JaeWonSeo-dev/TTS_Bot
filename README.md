@@ -73,6 +73,7 @@
 현재 기본 탑재 엔진:
 - `edge` : Microsoft Edge TTS
 - `xtts` : XTTS v2 기반 참조 음성 voice cloning TTS
+- `gpt_sovits` : GPT-SoVITS API 기반 화자 유사도 중심 voice cloning TTS
 
 기본 보이스 별칭:
 - `ko_female_1` -> `ko-KR-SunHiNeural`
@@ -82,9 +83,50 @@
 - `en_female_1` -> `en-US-JennyNeural`
 - `en_male_1` -> `en-US-GuyNeural`
 
+### GPT-SoVITS 화자 등록 방식
+
+GPT-SoVITS를 쓰려면 화자별 폴더를 아래처럼 넣으면 돼:
+
+```text
+voice_samples/
+  jaewon/
+    ref.wav
+    prompt.txt
+    speaker.json   # 선택
+```
+
+- `ref.wav`: 해당 화자를 대표하는 깨끗한 참조 음성
+- `prompt.txt`: `ref.wav` 안에서 실제로 말한 문장
+- `speaker.json`: 선택. prompt/language 메타를 넣고 싶을 때 사용
+
+`speaker.json` 예시:
+
+```json
+{
+  "prompt_text": "안녕하세요. 저는 테스트용 샘플 화자입니다.",
+  "prompt_language": "ko",
+  "text_language": "ko"
+}
+```
+
+그 다음:
+
+```text
+!voices gpt_sovits
+!setengine gpt_sovits
+!setvoice jaewon
+```
+
+권장 참조 음성 조건:
+- 8~20초 WAV
+- 한 사람만 말하는 음성
+- 배경음악 없음
+- 잡음/에코 적음
+- `prompt.txt` 내용과 실제 음성이 정확히 일치해야 함
+
 ### XTTS 화자 등록 방식
 
-XTTS를 쓰려면 참조 음성을 아래처럼 넣으면 돼:
+XTTS는 계속 보조 엔진으로 남겨뒀어. 빠른 비교 테스트가 필요하면 아래 구조를 그대로 쓸 수 있어:
 
 ```text
 voice_samples/
@@ -92,27 +134,11 @@ voice_samples/
     ref.wav
 ```
 
-또는 단일 파일도 가능해:
-
-```text
-voice_samples/
-  jaewon.wav
-```
-
-그 다음:
-
 ```text
 !voices xtts
 !setengine xtts
 !setvoice jaewon
 ```
-
-권장 참조 음성 조건:
-- 10~60초 WAV
-- 한 사람만 말하는 음성
-- 배경음악 없음
-- 잡음/에코 적음
-- 한국어/영어 둘 다 가능
 
 ## B 방식 학습 구조
 
@@ -180,5 +206,6 @@ python main.py
 ```
 
 `.env.example`을 복사해서 `.env`를 만들고 토큰/FFmpeg 경로를 넣으면 돼.
+GPT-SoVITS를 메인으로 쓸 거면 로컬 GPT-SoVITS API 서버를 먼저 켜고 `GPT_SOVITS_API_URL`을 맞춰 줘.
 XTTS를 쓸 거면 첫 실행 전에 추가로 모델 다운로드 시간이 걸릴 수 있어.
 디버깅이 필요하면 `DEBUG_LOG=true` 상태로 실행해서 콘솔 로그를 확인하면 돼.
