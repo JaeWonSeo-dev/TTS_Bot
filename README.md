@@ -220,3 +220,15 @@ python scripts/check_gpt_sovits_api.py --url http://127.0.0.1:9880/tts --method 
 ```
 
 상세 절차는 `docs/LOCAL_GPT_SOVITS_SETUP.md` 참고.
+
+추가 확인:
+
+```bash
+python scripts/check_local_gpt_sovits_setup.py
+```
+
+API 실행 래퍼:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_local_gpt_sovits_api.ps1
+```

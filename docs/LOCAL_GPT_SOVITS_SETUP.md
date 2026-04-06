@@ -10,7 +10,15 @@
 - `voice_samples/<voice_id>/ref.wav` 구조 인식 가능
 - `prompt.txt` / `speaker.json` 기반 화자 메타 인식 가능
 - `scripts/check_gpt_sovits_api.py`로 로컬 API 상태 확인 가능
+- `scripts/check_local_gpt_sovits_setup.py`로 로컬 GPT-SoVITS 설치 상태 확인 가능
+- `scripts/start_local_gpt_sovits_api.ps1`로 로컬 API 실행 래퍼 사용 가능
 - `training/ingest_samples.py` → `validate_dataset.py` → `prepare_dataset.py` 흐름 준비됨
+
+추가로 공식 GPT-SoVITS 저장소를 아래 경로에 내려받아 두었다.
+
+```text
+C:\Sjw_dev\Coding\GPT-SoVITS
+```
 
 ## 2. 로컬 폴더 구조
 
@@ -61,6 +69,29 @@ voice_samples/jaewon/
 http://127.0.0.1:9880/tts
 ```
 
+설치 상태 확인:
+
+```bash
+python scripts/check_local_gpt_sovits_setup.py
+```
+
+현재 기준 체크 포인트:
+- 공식 repo clone 완료: `C:\Sjw_dev\Coding\GPT-SoVITS`
+- API 기본 포트: `127.0.0.1:9880`
+- 아직 로컬 API 프로세스는 실행 전일 수 있음
+
+PowerShell에서 API 실행:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_local_gpt_sovits_api.ps1
+```
+
+필요하면 경로를 직접 지정:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_local_gpt_sovits_api.ps1 -RepoDir "C:\Sjw_dev\Coding\GPT-SoVITS" -PythonExe "python" -BindAddress "127.0.0.1" -Port 9880
+```
+
 상태 확인:
 
 ```bash
@@ -107,7 +138,8 @@ python training/prepare_dataset.py --voice-id jaewon
 
 ## 7. 현재 한계 / 체크 포인트
 
-- 실제 GPT-SoVITS 학습 커맨드는 네가 사용할 GPT-SoVITS 배포판 구조에 따라 다를 수 있다.
-- 그래서 현재 프로젝트는 **학습 전처리/정리 단계까지는 바로 진행 가능**하고,
-  **최종 학습 실행 커맨드 연결은 네 로컬 GPT-SoVITS 설치 경로 확인 후 맞춤 연결**하는 방식이 안전하다.
-- 즉, 지금 상태는 **샘플만 생기면 데이터셋 생성/검증/준비 + API 연동 테스트까지 가능한 상태**다.
+- 공식 GPT-SoVITS repo는 로컬에 clone해 두었지만, 모델 다운로드/환경 설치/실제 서버 기동은 아직 별도 진행이 필요하다.
+- 현재 머신에서는 `conda`가 바로 잡히지 않았으므로, 공식 설치 스크립트 실행 전에는 Python/torch 환경을 따로 맞출 필요가 있을 수 있다.
+- 그래서 현재 프로젝트는 **샘플 투입 전 준비 + 학습 전처리/정리 단계까지는 바로 진행 가능**하고,
+  **최종 학습 실행/실제 API 기동은 네 로컬 GPT-SoVITS 환경이 준비된 뒤 맞춤 연결**하는 방식이 안전하다.
+- 즉, 지금 상태는 **샘플만 생기면 화자 폴더 정리, 데이터셋 생성/검증/준비, API 연결 테스트까지 바로 가능한 상태**다.
