@@ -1,0 +1,6 @@
+{
+  "prompt_text": "안녕하세요. 저는 테스트용 샘플 화자입니다.",
+  "prompt_language": "ko",
+  "text_language": "ko",
+  "notes": "ref.wav를 넣은 뒤 prompt_text를 실제 발화와 정확히 맞춰 주세요."
+}

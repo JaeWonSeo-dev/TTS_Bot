@@ -209,3 +209,14 @@ python main.py
 GPT-SoVITS를 메인으로 쓸 거면 로컬 GPT-SoVITS API 서버를 먼저 켜고 `GPT_SOVITS_API_URL`을 맞춰 줘.
 XTTS를 쓸 거면 첫 실행 전에 추가로 모델 다운로드 시간이 걸릴 수 있어.
 디버깅이 필요하면 `DEBUG_LOG=true` 상태로 실행해서 콘솔 로그를 확인하면 돼.
+
+## 로컬 GPT-SoVITS 준비 빠른 시작
+
+샘플이 아직 없어도 아래까지는 미리 준비할 수 있어:
+
+```bash
+python scripts/bootstrap_voice_sample.py jaewon --language ko --prompt-text "안녕하세요. 저는 테스트용 샘플 화자입니다."
+python scripts/check_gpt_sovits_api.py --url http://127.0.0.1:9880/tts --method GET
+```
+
+상세 절차는 `docs/LOCAL_GPT_SOVITS_SETUP.md` 참고.
